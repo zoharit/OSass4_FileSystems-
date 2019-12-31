@@ -1,0 +1,862 @@
+diff --git a/Makefile b/Makefile
+index 911dd8d..b0e2dc1 100644
+--- a/Makefile
++++ b/Makefile
+@@ -28,6 +28,7 @@ OBJS = \
+ 	uart.o\
+ 	vectors.o\
+ 	vm.o\
++	
+ 
+ # Cross-compiling (e.g., on Mac OS X)
+ # TOOLPREFIX = i386-jos-elf
+@@ -182,6 +183,7 @@ UPROGS=\
+ 	_usertests\
+ 	_wc\
+ 	_zombie\
++	_lsnd\
+ 
+ fs.img: mkfs README $(UPROGS)
+ 	./mkfs fs.img README $(UPROGS)
+diff --git a/defs.h b/defs.h
+index 528b359..3a76467 100644
+--- a/defs.h
++++ b/defs.h
+@@ -33,7 +33,7 @@ void            fileinit(void);
+ int             fileread(struct file*, char*, int n);
+ int             filestat(struct file*, struct stat*);
+ int             filewrite(struct file*, char*, int n);
+-
++void            get_file_stat(char* res);
+ // fs.c
+ void            readsb(int dev, struct superblock *sb);
+ int             dirlink(struct inode*, char*, uint);
+@@ -52,11 +52,16 @@ struct inode*   nameiparent(char*, char*);
+ int             readi(struct inode*, char*, uint, uint);
+ void            stati(struct inode*, struct stat*);
+ int             writei(struct inode*, char*, uint, uint);
+-
++void            get_inodeinfo(char* res, int index);
+ // ide.c
+ void            ideinit(void);
+ void            ideintr(void);
+ void            iderw(struct buf*);
++int             get_read_opertions();
++int             get_write_opertions();
++int             get_wating_opertions();
++void            get_working_blockes(char *);
++void            itoa(char *, int);
+ 
+ // ioapic.c
+ void            ioapicenable(int irq, int cpu);
+@@ -120,9 +125,14 @@ void            userinit(void);
+ int             wait(void);
+ void            wakeup(void*);
+ void            yield(void);
+-
++void            getPids(int* pids); //get all the valid pids
++int             getPID(int pos);    //get the pid from the table by pos
++void            getStatus(char* ansBuf);
++void            getNames(char* ansBuf);
+ // procfs.c
+ void            procfsinit(void);
++void            insertNumToBuf(char *buff, int num);
++void            insertTextToBuf(char *buff, char * text);
+ 
+ // swtch.S
+ void            swtch(struct context**, struct context*);
+diff --git a/file.c b/file.c
+index 24b32c2..45790ba 100644
+--- a/file.c
++++ b/file.c
+@@ -155,3 +155,50 @@ filewrite(struct file *f, char *addr, int n)
+   panic("filewrite");
+ }
+ 
++
++
++void
++get_file_stat(char* res)
++{
++  int fdfree = 0;
++  int unique = 0;
++  int read = 0;
++  int write = 0;
++  int used = 0;
++  int totalref=0;
++  struct file *fd;
++
++  acquire(&ftable.lock);
++  for(fd = ftable.file; fd < &ftable.file[NFILE]; fd++){
++    totalref+=fd->ref;
++    if(fd->ref == 0)
++        fdfree++;
++    else{
++        used++;
++    }
++    if(fd->type == FD_INODE)
++        unique++;
++    if(fd->readable)
++        read++;
++    if(fd->writable)
++        write++; 
++  }
++  insertTextToBuf(res, "Free fds:\0");
++  insertNumToBuf(res,fdfree);
++  insertTextToBuf(res, "\n");
++  insertTextToBuf(res, "Unique inode fds:\0");
++  insertNumToBuf(res,unique);
++  insertTextToBuf(res, "\n");
++  insertTextToBuf(res, "Writeable fds:\0");
++  insertNumToBuf(res,read);
++  insertTextToBuf(res, "\n");
++  insertTextToBuf(res, "Readable fds:\0");
++  insertNumToBuf(res,write);
++  insertTextToBuf(res, "\n");
++  insertTextToBuf(res, "Refs per fds:\0");
++  insertNumToBuf(res,totalref/used);
++  insertTextToBuf(res, "\n");
++  release(&ftable.lock);
++
++}
++
+diff --git a/fs.c b/fs.c
+index 870d7bf..72426c8 100644
+--- a/fs.c
++++ b/fs.c
+@@ -21,7 +21,11 @@
+ #include "buf.h"
+ #include "file.h"
+ 
++
+ #define min(a, b) ((a) < (b) ? (a) : (b))
++#define T_DIR  1   // Directory
++#define T_FILE 2   // File
++#define T_DEV  3   // Device
+ static void itrunc(struct inode*);
+ // there should be one superblock per disk device, but we run with
+ // only one device
+@@ -677,3 +681,45 @@ nameiparent(char *path, char *name)
+ {
+   return namex(path, 1, name);
+ }
++
++void
++get_inodeinfo(char* res, int index)
++{
++   static char *type[] = {
++
++  [T_DIR]    "DIR",
++  [T_FILE]    "FILE",
++  [T_DEV]     "DEV",
++
++  };
++  acquire(&icache.lock);
++  insertTextToBuf(res, "Device:\0");
++  insertNumToBuf(res,icache.inode[index].dev);
++  insertTextToBuf(res, "\n");
++  insertTextToBuf(res, "Inode number:\0");
++  insertNumToBuf(res,icache.inode[index].inum);
++  insertTextToBuf(res, "\n");
++  insertTextToBuf(res, "is valid:\0");
++  insertNumToBuf(res,icache.inode[index].valid);
++  insertTextToBuf(res, "\n");
++  insertTextToBuf(res, "type:\0");
++  insertTextToBuf(res,type[icache.inode[index].type]);
++  insertTextToBuf(res, "\n");
++  insertTextToBuf(res, "major minor:\0");
++  insertTextToBuf(res,"(");
++  insertNumToBuf(res,icache.inode[index].major);
++  insertTextToBuf(res,",");
++  insertNumToBuf(res,icache.inode[index].minor);
++  insertTextToBuf(res,")");
++  insertTextToBuf(res, "\n");
++  insertTextToBuf(res, "hard links:\0");
++  insertNumToBuf(res,icache.inode[index].nlink);
++  insertTextToBuf(res, "\n");
++  insertTextToBuf(res, "blocks used:\0");
++  if(icache.inode[index].size % BSIZE == 0)
++     insertNumToBuf(res,icache.inode[index].size / BSIZE);
++  else
++     insertNumToBuf(res,(icache.inode[index].size / BSIZE)+1);
++  insertTextToBuf(res, "\n");
++  release(&icache.lock);
++}
+\ No newline at end of file
+diff --git a/ide.c b/ide.c
+index b4c0b1f..e817765 100644
+--- a/ide.c
++++ b/ide.c
+@@ -166,3 +166,69 @@ iderw(struct buf *b)
+ 
+   release(&idelock);
+ }
++
++
++int 
++get_read_opertions()
++{
++  int res=0;
++  struct buf * buf;
++  acquire(&idelock);
++  for(buf = idequeue; buf!=0; buf = buf->qnext){
++    if(!(buf->flags & B_DIRTY)){
++      res++;
++    }
++  }
++  release(&idelock);
++  return res;
++}
++
++int 
++get_write_opertions()
++{
++
++  int res=0;
++  struct buf * buf;
++  acquire(&idelock);
++  for(buf = idequeue; buf!=0; buf = buf->qnext){
++    if(buf->flags & B_DIRTY){
++      res++;
++    }
++  }
++  release(&idelock);
++  return res;
++}
++
++int 
++get_wating_opertions()
++{
++return get_write_opertions()+get_read_opertions();
++}
++
++void
++get_working_blockes(char * res){
++  acquire(&idelock);
++  struct buf *buf;
++
++  char device[10]={0};
++  char block[10]={0};
++
++  for(buf = idequeue; buf!=0; buf = buf->qnext){
++    itoa(device, buf->dev);
++
++    memmove(res, device , strlen(device));
++    res+= strlen(device);
++
++    memmove(res, ",", 1);
++    res++;;
++
++    itoa(block, buf->blockno);
++    memmove(res, block , strlen(block));
++   res+= strlen(block);
++
++    memmove(res, ";", 1);
++    res++;
++
++  }
++  release(&idelock);
++}
+\ No newline at end of file
+diff --git a/ls.c b/ls.c
+index c76187e..773df94 100644
+--- a/ls.c
++++ b/ls.c
+@@ -46,8 +46,9 @@ ls(char *path)
+     printf(1, "%s %d %d %d\n", fmtname(path), st.type, st.ino, st.size);
+     break;
+ 
+-  case T_DIR:
+   case T_DEV:
++  case T_DIR:
++  
+     if(strlen(path) + 1 + DIRSIZ + 1 > sizeof buf){
+       printf(1, "ls: path too long\n");
+       break;
+diff --git a/lsnd.c b/lsnd.c
+new file mode 100644
+index 0000000..2945bef
+--- /dev/null
++++ b/lsnd.c
+@@ -0,0 +1,221 @@
++#include "types.h"
++#include "stat.h"
++#include "user.h"
++#include "fs.h"
++
++
++//get the numbers from the buffer
++void substring( const char srcString[], char destString[], int startPosition, int length)
++{ 
++ int k=1;
++	for( int i = 0; i < length; ++i )
++	{
++       if((srcString[startPosition + i]>='0' && srcString[startPosition + i]<='9') ||
++        srcString[startPosition + i]==','
++        || srcString[startPosition + i]==')'|| srcString[startPosition + i]=='('
++        ){
++		    destString[i] = srcString[startPosition + i];
++            k++;
++        }
++		if( destString[i] == 0 )
++			return;	// reached the end of srcString
++	}
++	
++}
++
++//get the type of inode from the buffer
++void typeofinode( const char srcString[], char destString[], int startPosition, int length)
++{
++ int k=1;
++	for( int i = 0; i < length; ++i )
++	{
++        if(srcString[startPosition + i]>='A' && srcString[startPosition + i]<='Z')
++     {
++		    destString[i] = srcString[startPosition + i];
++            k++;
++        }
++		if( destString[i] == 0 )
++			return;	// reached the end of srcString
++	}	
++}
++
++int find(char *str, char *substr)
++{
++	  int pos=0;
++      while (*str) 
++	  {
++		    char *Begin = str;
++		    char *pattern = substr;
++            pos++;
++		    
++		    // If first character of sub string match, check for whole string
++		    while (*str && *pattern && *str == *pattern) 
++			{
++                  str++;
++			      pattern++;
++		    }
++		    // If complete sub string match, return the position of the substring 
++		    if (!*pattern)
++		    	  return pos;
++		    	  
++		    str = Begin + 1;	// Increament main string 
++	  }
++	  return 0;
++}
++
++
++
++void printinodeinfo(char * buf){
++    int pos=0;
++    char s[5]={0} ;
++    //Device:
++    pos= find(buf,":");
++    substring(buf,s,pos,5);
++	printf(1,"%s ",s);
++    buf=buf+pos;
++    //Inode number:
++    char s2[5]={0} ;
++    pos= find(buf,":");
++    substring(buf,s2,pos,5);
++	printf(1,"%s ",s2);
++    buf=buf+pos;
++    //is valid:
++    char s3[5]={0} ;
++    pos= find(buf,":");
++    substring(buf,s3,pos,5);
++	printf(1,"%s ",s3);
++    buf=buf+pos;
++    //type:
++    char s4[5]={0} ;
++    pos= find(buf,":");
++    typeofinode(buf,s4,pos,5);
++	printf(1,"%s ",s4);
++    buf=buf+pos;
++    //major minor:
++   char s5[6]={0} ;
++     pos= find(buf,":");
++     substring(buf,s5,pos,6);
++	 printf(1,"%s ",s5);
++     buf=buf+pos;
++    //hard links:
++    char s6[5]={0} ;
++    pos= find(buf,":");
++    substring(buf,s6,pos,5);
++	printf(1,"%s ",s6);
++    buf=buf+pos;
++    //blocks used:
++    char s7[5]={0} ;
++    pos= find(buf,":");
++    substring(buf,s7,pos,5);
++	printf(1,"%s\n",s7);
++//<#device> <#inode> <is valid> <type> <(major,minor)> <hard links> <blocks used>
++}
++
++int isinodedir(char * name){
++	if (strcmp(name, "inodeinfo") == 0)
++		return 1;
++    return 0;
++}
++int isinodepage(int inum){
++  int ninode = (inum % 200) - 50; 
++  if (ninode>=0 && ninode<50)           
++    return 1;
++  
++  return 0;
++}
++
++void openfd(char *path){
++
++ char buf[512];
++ int fd;
++ int num_of_bits;
++ if((fd = open(path, 0)) < 0){
++    printf(2, "cannot open %s\n", path);
++    return;
++}
++ if((num_of_bits = read(fd, buf, sizeof(buf))) > 0)
++    printinodeinfo(buf);
++ if(num_of_bits < 0)
++    printf(2, "read error\n");
++  close(fd);
++}
++
++
++void lsOfInodeInfoDir(char *path){
++   char buf[512], *p;
++  int fd;
++  struct dirent dir;
++
++  if((fd = open(path, 0)) < 0){
++    printf(2, "lsof: cannot open %s\n", path);
++    return;
++  }
++
++  strcpy(buf, path);
++  p = buf+strlen(buf);
++  *p++ = '/';
++   printf(1, "ls %s \n",buf);
++  while(read(fd, &dir, sizeof(dir)) == sizeof(dir)){
++    if(dir.inum == 0)
++      continue;
++    printf(1, "%s\n", dir.name);
++
++    memmove(p, dir.name, DIRSIZ);
++    p[DIRSIZ] = 0;
++
++    if (isinodedir(dir.name))
++    {
++        lsOfInodeInfoDir(buf);
++    }
++  }
++  close(fd);
++}
++
++
++void PrintInodeInfoPages(char *path){
++  char buf[512], *p;
++  int fd=0;
++  struct dirent dir;
++
++//open the path and get file descriptor
++  if((fd = open(path, 0)) < 0){
++    printf(2, "lsof: cannot open %s\n", path);
++    return;
++  }
++
++// insert path to buf
++  strcpy(buf, path);
++  p = buf+strlen(buf);
++// add / to path
++  *p++ = '/';
++
++//read from our path
++  while(read(fd, &dir, sizeof(dir)) == sizeof(dir)){
++    if(dir.inum != 0){
++        memmove(p, dir.name, DIRSIZ);
++        p[DIRSIZ] = 0;
++        //check if the path is /proc/inodeinfo- if so we enter recursivelly to the path
++        if (isinodedir(dir.name)) 
++            PrintInodeInfoPages(buf);
++        
++        //check if the path is /proc/inodeinfo/number - if so we open every page and print it's content
++        if(isinodepage(dir.inum))
++            openfd(buf);
++    }
++  }
++  close(fd);
++}
++
++
++ 
++
++int main(int argc, char *argv[]){
++ if(argc>1){
++    lsOfInodeInfoDir("proc");
++ }
++ else{
++    PrintInodeInfoPages("proc");
++ }
++
++  exit();
++}
+diff --git a/proc.c b/proc.c
+index 806b1b1..f686540 100644
+--- a/proc.c
++++ b/proc.c
+@@ -12,6 +12,7 @@ struct {
+   struct proc proc[NPROC];
+ } ptable;
+ 
++
+ static struct proc *initproc;
+ 
+ int nextpid = 1;
+@@ -532,3 +533,60 @@ procdump(void)
+     cprintf("\n");
+   }
+ }
++
++void
++getPids(int* pids){
++  struct proc *p;
++  int i=0;
++  acquire(&ptable.lock);
++  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
++      if (p->state == RUNNING || p->state == RUNNABLE || p->state == SLEEPING){
++        pids[i] = p->pid;
++        i++;
++      }
++  }
++  release(&ptable.lock);
++}
++
++int getPID(int pos){
++   acquire(&ptable.lock);
++   struct proc* p=ptable.proc;
++   p=p+pos;
++  release(&ptable.lock);
++  return p->pid;
++}
++
++void
++getStatus(char *ansBuf){
++  static char *states[] = {
++  [UNUSED]    "unused",
++  [EMBRYO]    "embryo",
++  [SLEEPING]  "sleep ",
++  [RUNNABLE]  "runble",
++  [RUNNING]   "run   ",
++  [ZOMBIE]    "zombie"
++  };
++  acquire(&ptable.lock);
++   struct proc* p=ptable.proc;
++   p=p+ansBuf[0];
++    ansBuf[0] = 0;
++  release(&ptable.lock);
++  insertTextToBuf(ansBuf,"process status:");
++  insertTextToBuf(ansBuf, states[p->state]);
++  insertTextToBuf(ansBuf, "\n");
++  insertTextToBuf(ansBuf,"memory usage:");
++  insertNumToBuf(ansBuf, p->sz);
++  insertTextToBuf(ansBuf, "\n");
++}
++
++void
++getNames(char * ansBuf){
++  acquire(&ptable.lock);
++   struct proc* p=ptable.proc;
++   p=p+ansBuf[0];
++   ansBuf[0] = 0;
++  release(&ptable.lock);
++  insertTextToBuf(ansBuf,"process name:");
++  insertTextToBuf(ansBuf, p->name);
++  insertTextToBuf(ansBuf, "\n");
++}
+\ No newline at end of file
+diff --git a/procfs.c b/procfs.c
+index 8cb06cc..5cd174f 100644
+--- a/procfs.c
++++ b/procfs.c
+@@ -12,20 +12,152 @@
+ #include "proc.h"
+ #include "x86.h"
+ 
+-int 
++#define MINOR_DIR  1   // Virtual Directory
++#define MAX_DIRENT 1056
++//holds a reference to the functions in an array
++typedef int (*proc_functions_array)(char*);
++
++extern struct {
++  struct spinlock lock;
++  struct inode inode[NINODE];
++} icache;
++
++int fillInodeInfoDirents(char *ansBuf);
++
++int fillProcDirents(char *ansBuf);
++
++int fillPidDir(char *ansBuf);
++
++void insertDirToBuf(char *buf, char * dirName, int inum, int offset);
++
++void insertNumToBuf(char *buff, int num);
++
++void insertTextToBuf(char *buff, char * text);
++int num_inode = 0;
++char  proc_name [6] = {'/','p','r','o','c',0};
++char dir_proc_name [7] = {'/','p','r','o','c','/',0};
++char dir_name [5] = {'n','a','m','e',0};
++char dir_status [7] = {'s','t','a','t','u','s',0};
++
++int
+ procfsisdir(struct inode *ip) {
+-  return 0;
++  	if (num_inode == 0){
++		struct superblock sb;
++  	readsb(ip->dev, &sb);
++  	num_inode = sb.ninodes;
++  }
++  //**********************************
++  //ip->inum%200== pid dir (Minor dir)
++  // namei("/proc")->inum (Minor Dir)
++  //ip->inum < num_inode real dir
++  //idinodeinfo dir is dir
++  //**********************************
++
++
++  return ip->minor == MINOR_DIR || ip->inum < num_inode ;
++}
++
++int 
++ideinfo(char* ansBuf){
++  insertTextToBuf(ansBuf, "Waiting operations:\0");
++  insertNumToBuf(ansBuf, get_wating_opertions());
++  insertTextToBuf(ansBuf, "\n");
++  insertTextToBuf(ansBuf, "Read operations:\0");
++  insertNumToBuf(ansBuf, get_read_opertions());
++  insertTextToBuf(ansBuf, "\n");
++  insertTextToBuf(ansBuf, "Write operations:\0");
++  insertNumToBuf(ansBuf, get_write_opertions());
++	insertTextToBuf(ansBuf, "\n");
++  insertTextToBuf(ansBuf,"Working blocks:\0");
++  get_working_blockes(ansBuf+strlen(ansBuf));
++	insertTextToBuf(ansBuf, "\n");
++
++  return strlen(ansBuf);
++}
++
++int 
++filestatfunc(char* ansBuf){
++ get_file_stat(ansBuf);
++ return strlen(ansBuf);
++}
++
++int 
++inodeinfo(char* ansBuf){
++ // cprintf("inodeinfo %d \n",ansBuf[1]);
++  get_inodeinfo(ansBuf,ansBuf[1]);
++ return strlen(ansBuf);
++}
++
++int 
++pidnames(char* ansBuf){
++ getNames(ansBuf);
++ return strlen(ansBuf);
++}
++
++int 
++pidstatus(char* ansBuf){
++ getStatus(ansBuf);
++ return strlen(ansBuf);
+ }
+ 
++proc_functions_array
++ callfunc(struct inode *ip){
++  if (ip->inum < num_inode)          //create the proc dir with its fileds
++      return &fillProcDirents;
++  if (ip->inum == (num_inode+1))			// ideinfo dir
++      return &ideinfo;
++  if (ip->inum == (num_inode+2))			// filestat
++      return &filestatfunc;
++  if (ip->inum == (num_inode+3))		//fill inode
++      return &fillInodeInfoDirents;
++  if (ip->inum%200 == 0)              //pid dir
++      return &fillPidDir;
++  if (ip->inum%200 == 1)              //pid name
++      return &pidnames;
++  if (ip->inum%200 == 2)              //pid status
++      return &pidstatus;
++  int ninode = (ip->inum % 200) - 50; 
++  if (ninode>=0 && ninode<NINODE)             	// inodeinfo 
++      return &inodeinfo;
++	cprintf("Invalid inum\n");
++	return 0;
++ }
++
++
+ void 
+ procfsiread(struct inode* dp, struct inode *ip) {
++  ip->valid = 1;
++  ip->major = PROCFS;
++  ip->type = T_DEV;
++  if(ip->inum%200==0 || ip->inum == namei(proc_name)->inum || ip->inum == (num_inode+3)){
++    ip->minor=MINOR_DIR;
++  }
+ }
+ 
+ int
+ procfsread(struct inode *ip, char *dst, int off, int n) {
+-  return 0;
++  int pos=0;
++  int ninode=0;
++  if(num_inode == 0){
++    struct superblock sb;
++    readsb(ip->dev,&sb);
++    num_inode = sb.ninodes;
++  }
++	char ansBuf[MAX_DIRENT] = {0}; 
++	proc_functions_array func = callfunc(ip);
++  //from 200 + there are pid dir
++	if (ip->inum >= num_inode+200){
++		pos = (ip->inum-num_inode)/200 - 1;
++    ninode = (ip->inum % 200) - 50; 
++    ansBuf[1] = ninode;
++		ansBuf[0] = pos;
++  }
++  int ansSize = func(ansBuf);
++	memmove(dst, ansBuf+off, n);
++	return n < (ansSize-off) ? n: (ansSize-off);
+ }
+ 
++
+ int
+ procfswrite(struct inode *ip, char *buf, int n)
+ {
+@@ -40,3 +172,111 @@ procfsinit(void)
+   devsw[PROCFS].write = procfswrite;
+   devsw[PROCFS].read = procfsread;
+ }
++
++void itoa(char *src, int n){
++	int i = 0;
++	int string_len = 0;
++  if (n == 0){
++    src[0] = '0';
++    return;
++  }
++	while(n != 0){
++		src[string_len++] = n % 10 + '0';
++		n = n / 10; 
++	}
++	for(i = 0; i < string_len/2; i++){
++		char tmp = src[i];
++		src[i] = src[string_len - 1 - i];
++		src[string_len - 1 - i] = tmp;
++	}
++  src[string_len+1]='\0';
++}
++
++void 
++insertDirToBuf(char *buf, char * dirName, int inum, int offset){
++  struct dirent dir;
++	dir.inum = inum;
++	safestrcpy(dir.name, dirName, strlen(dirName)+1);
++  memmove(buf + offset*sizeof(struct dirent) , &dir, sizeof(struct dirent));
++}
++
++void insertTextToBuf(char *buff, char * text){
++  int textlen = strlen(text);
++  int sz = strlen(buff);
++  memmove(buff + sz, text,textlen);
++}
++
++void 
++insertNumToBuf(char *buff, int num){
++  char string_num[10] = {0};
++  itoa(string_num, num);
++  insertTextToBuf(buff, string_num);
++}
++
++
++int fillPidDir(char *ansBuf){
++	short pos = ansBuf[0];
++	int pid = getPID(pos);
++  char dirPath[10] = {0};
++  //creates path: proc/pidnum
++  insertTextToBuf(dirPath, dir_proc_name);
++	insertNumToBuf(dirPath, pid);
++  //current dir 
++	insertDirToBuf(ansBuf,".\0", namei(dirPath)->inum, 0);
++	//my father is /proc
++  insertDirToBuf(ansBuf,"..\0", namei(proc_name)->inum, 1);
++  //creates the new dir- name and status after proc/pid/ 
++  insertDirToBuf(ansBuf,dir_name, num_inode+1+((pos+1)*200), 2);
++  insertDirToBuf(ansBuf,"status\0", num_inode+2+((pos+1)*200), 3);
++	return sizeof(struct dirent)*4;
++}
++
++
++
++int fillProcDirents(char *ansBuf){
++	//define the buffer to each virtual dir
++  insertDirToBuf(ansBuf,".\0", namei(proc_name)->inum, 0);
++	insertDirToBuf(ansBuf,"..\0", namei("")->inum, 1);
++	insertDirToBuf(ansBuf,"ideinfo\0", num_inode+1, 2);
++  insertDirToBuf(ansBuf,"filestat\0", num_inode+2, 3);
++  insertDirToBuf(ansBuf,"inodeinfo\0", num_inode+3, 4);
++  
++  //define the pid dir
++  //now we define that every pid dir will divide without reminder in 200
++  int pids[NPROC] = {0};
++  getPids(pids);
++  int i, j = 5;
++  char numContainer[3] = {0};
++  for (i = 0; i<NPROC; i++){
++  	if (pids[i] != 0){
++	    itoa(numContainer, pids[i]);
++	    insertDirToBuf(ansBuf,numContainer, num_inode+((i+1)*200), j);
++	    j++;
++  	}
++  }
++ 	return sizeof(struct dirent)*j;
++}
++
++
++int fillInodeInfoDirents(char *ansBuf){
++  int pos = ansBuf[0];
++  char dirPath[20] = {0};
++  insertTextToBuf(dirPath, "/proc\0");
++  insertTextToBuf(dirPath, "/inodeinfo\0");
++	insertDirToBuf(ansBuf,".", namei(dirPath)->inum, 0);
++	insertDirToBuf(ansBuf,"..\0", namei(dir_proc_name)->inum, 1);
++  int i, j = 2;
++  char numContainer[10] = {0};
++  acquire(&icache.lock);
++
++  for(i = 0; i < NINODE; i++) {
++    if(icache.inode[i].inum != 0){
++      itoa(numContainer, i);
++      insertDirToBuf(ansBuf,numContainer,  num_inode+50+((pos+1)*200+i),j);
++    }
++    j++;
++  }
++  release(&icache.lock);
++
++	return sizeof(struct dirent)*j;
++}
+\ No newline at end of file
+diff --git a/sysfile.c b/sysfile.c
+index 87e508b..97bef8b 100644
+--- a/sysfile.c
++++ b/sysfile.c
+@@ -382,7 +382,7 @@ sys_chdir(void)
+     return -1;
+   }
+   ilock(ip);
+-  if(ip->type != T_DIR){
++  if(ip->type != T_DIR && (ip->type!=T_DEV && ip->major!=CONSOLE)){
+     iunlockput(ip);
+     end_op();
+     return -1;
